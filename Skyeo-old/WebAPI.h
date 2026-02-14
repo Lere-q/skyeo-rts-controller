@@ -19,7 +19,6 @@ public:
     static void handleShades();
     static void handleShadeCommand();
     static void handleShadeCreate();
-    static void handleShadePair();
     static void handleShadeDelete();
     static void handleSchedules();
     static void handleScheduleCreate();
@@ -29,9 +28,6 @@ public:
     static void handleWifiScan();
     static void handleDeviceInfo();
     static void handleReboot();
-    static void handleReset();
-    static void handleBackup();
-    static void handleRestore();
     static void handleNotFound();
     
     // Antenna / Receiver

@@ -17,11 +17,8 @@ bool WebAPI::wsEnabled = false;
 void WebAPI::begin() {
     // HTTP Endpoints
     server.on("/", HTTP_GET, handleRoot);
-    server.on("/api/shade/delete", HTTP_POST, handleShadeDelete);
-    server.on("/api/shade/delete", HTTP_DELETE, handleShadeDelete);
     server.on("/api/shades", HTTP_GET, handleShades);
     server.on("/api/shades", HTTP_POST, handleShadeCreate);
-    server.on("/api/shades/pair", HTTP_POST, handleShadePair);
     server.on("/api/shades/command", HTTP_POST, handleShadeCommand);
     server.on("/api/shades/", HTTP_DELETE, handleShadeDelete);
     server.on("/api/schedules", HTTP_GET, handleSchedules);
@@ -32,9 +29,6 @@ void WebAPI::begin() {
     server.on("/api/wifi/scan", HTTP_GET, handleWifiScan);
     server.on("/api/info", HTTP_GET, handleDeviceInfo);
     server.on("/api/reboot", HTTP_POST, handleReboot);
-    server.on("/api/reset", HTTP_POST, handleReset);
-    server.on("/api/backup", HTTP_GET, handleBackup);
-    server.on("/api/restore", HTTP_POST, handleRestore);
     
     // Antenna / Receiver
     server.on("/api/antenna/enable", HTTP_POST, handleAntennaEnable);
@@ -106,7 +100,6 @@ void WebAPI::handleShades() {
             json += "\"position\":" + String(state ? state->position : 50) + ",";
             json += "\"target\":" + String(state ? state->target : 50) + ",";
             json += "\"moving\":" + String(state && state->moving ? "true" : "false") + ",";
-            json += "\"direction\":" + String(state ? state->direction : 0) + ",";
             json += "\"remoteAddress\":\"" + String(cfg.remoteAddress, HEX) + "\",";
             json += "\"upTime\":" + String(cfg.upTime) + ",";
             json += "\"downTime\":" + String(cfg.downTime);
@@ -175,117 +168,26 @@ void WebAPI::handleShadeCreate() {
         broadcastShadeUpdate(id);
         sendJSON(200, "{\"success\":true,\"id\":" + String(id) + "}");
     } else {
-        sendError(500, "Fehler beim Hinzufugen");
-    }
-}
-
-void WebAPI::handleShadePair() {
-    // Enable receiver to listen for remote
-    Somfy.enableReceive();
-    
-    // Wait a short time for a frame to be received
-    delay(3000);
-    
-    auto frames = Somfy.getReceivedFrames();
-    
-    if (frames.size() > 0) {
-        // Get the last received frame
-        auto& frame = frames.back();
-        
-        if (frame.direction && strcmp(frame.direction, "RX") == 0) {
-            // Found a new remote - create shade
-            uint8_t id = 255;
-            for (uint8_t i = 0; i < MAX_SHADES; i++) {
-                ShadeConfig cfg;
-                if (!Config::loadShade(i, cfg)) {
-                    id = i;
-                    break;
-                }
-            }
-            
-            if (id == 255) {
-                sendError(400, "Maximale Anzahl erreicht");
-                return;
-            }
-            
-            // Generate a name
-            String name = "Rolladen " + String(id + 1);
-            
-            if (Somfy.addShade(id, name.c_str(), frame.remoteAddress, 20000, 20000)) {
-                // Send PROG command to pair
-                delay(500);
-                Somfy.sendCommand(id, SOMFY_PROG);
-                broadcastShadeUpdate(id);
-                sendJSON(200, "{\"success\":true,\"shadeId\":" + String(id) + ",\"address\":\"0x" + String(frame.remoteAddress, HEX) + "\"}");
-                return;
-            }
-        }
-    }
-    
-    // No frame received - create placeholder
-    uint8_t id = 255;
-    for (uint8_t i = 0; i < MAX_SHADES; i++) {
-        ShadeConfig cfg;
-        if (!Config::loadShade(i, cfg)) {
-            id = i;
-            break;
-        }
-    }
-    
-    if (id == 255) {
-        sendError(400, "Maximale Anzahl erreicht");
-        return;
-    }
-    
-    String name = "Rolladen " + String(id + 1);
-    if (Somfy.addShade(id, name.c_str(), 0, 20000, 20000)) {
-        broadcastShadeUpdate(id);
-        sendJSON(200, "{\"success\":true,\"shadeId\":" + String(id) + ",\"address\":\"0x0\"}");
-    } else {
-        sendError(500, "Fehler");
+        sendError(500, "Fehler beim Hinzufügen");
     }
 }
 
 void WebAPI::handleShadeDelete() {
-    Serial.printf("[API] handleShadeDelete called, uri=%s, method=%d\n", server.uri().c_str(), server.method());
-    
-    uint8_t id = 255;
-    
-    // Try from query param first
-    if (server.hasArg("id")) {
-        id = server.arg("id").toInt();
-    }
-    
-    // Try to get ID from body if not in query
-    if (id == 255 && server.hasArg("plain")) {
-        String body = server.arg("plain");
-        int idStart = body.indexOf("\"id\":");
-        if (idStart >= 0) {
-            idStart += 5;
-            // Skip whitespace
-            while (idStart < body.length() && (body.charAt(idStart) == ' ' || body.charAt(idStart) == '\t')) idStart++;
-            // Find end of number
-            int idEnd = idStart;
-            while (idEnd < body.length() && (body.charAt(idEnd) >= '0' && body.charAt(idEnd) <= '9')) {
-                idEnd++;
-            }
-            if (idEnd > idStart) {
-                id = body.substring(idStart, idEnd).toInt();
-            }
-        }
-    }
-    
-    Serial.printf("[API] Delete shade request, id=%d, MAX=%d\n", id, MAX_SHADES);
-    
-    if (id >= MAX_SHADES || id == 255) {
-        sendError(400, "Ungultige ID");
+    String uri = server.uri();
+    int lastSlash = uri.lastIndexOf('/');
+    if (lastSlash < 0) {
+        sendError(400, "Ungültige ID");
         return;
     }
     
-    bool removed = Somfy.removeShade(id);
-    Serial.printf("[API] Remove result: %s\n", removed ? "OK" : "FAILED");
+    uint8_t id = uri.substring(lastSlash + 1).toInt();
     
-    if (removed) {
+    if (id >= MAX_SHADES) {
+        sendError(400, "Ungültige ID");
+        return;
+    }
+    
+    if (Somfy.removeShade(id)) {
         broadcastShadeUpdate(id);
         sendJSON(200, "{\"success\":true}");
     } else {
@@ -300,74 +202,37 @@ void WebAPI::handleShadeCommand() {
     }
     
     String body = server.arg("plain");
-    Serial.printf("[API] shadeCommand body: %s\n", body.c_str());
     
-    // Parse ID - try both "id" and "shadeId"
-    uint8_t id = 255;
-    int idStart = body.indexOf("\"shadeId\":");
-    if (idStart < 0) idStart = body.indexOf("\"id\":");
-    if (idStart >= 0) {
-        idStart += body.substring(idStart).indexOf(":") + 1;
-        while (idStart < body.length() && (body.charAt(idStart) == ' ' || body.charAt(idStart) == '\t')) idStart++;
-        int idEnd = idStart;
-        while (idEnd < body.length() && body.charAt(idEnd) >= '0' && body.charAt(idEnd) <= '9') idEnd++;
-        if (idEnd > idStart) id = body.substring(idStart, idEnd).toInt();
-    }
+    // Parse ID
+    int idStart = body.indexOf("\"id\":") + 5;
+    uint8_t id = body.substring(idStart).toInt();
     
-    Serial.printf("[API] parsed id: %d\n", id);
+    // Parse command
+    int cmdStart = body.indexOf("\"cmd\":\"") + 7;
+    int cmdEnd = body.indexOf("\"", cmdStart);
+    String cmd = body.substring(cmdStart, cmdEnd);
     
-    if (id == 255) {
-        sendError(400, "Keine ID");
-        return;
-    }
-    
-    // Check if shade exists
     ShadeState* shade = Somfy.getShade(id);
     if (!shade) {
         sendError(404, "Rolladen nicht gefunden");
         return;
     }
     
-    // Parse command - try both "command" and "cmd"
-    String cmd = "";
-    int cmdStart = body.indexOf("\"command\":");
-    if (cmdStart < 0) cmdStart = body.indexOf("\"cmd\":");
-    if (cmdStart >= 0) {
-        cmdStart += body.substring(cmdStart).indexOf(":") + 1;
-        while (cmdStart < body.length() && (body.charAt(cmdStart) == ' ' || body.charAt(cmdStart) == '\t')) cmdStart++;
-        if (body.charAt(cmdStart) == '"') {
-            cmdStart++;
-            int cmdEnd = body.indexOf("\"", cmdStart);
-            if (cmdEnd > cmdStart) cmd = body.substring(cmdStart, cmdEnd);
-        } else {
-            int cmdEnd = cmdStart;
-            while (cmdEnd < body.length() && body.charAt(cmdEnd) >= '0' && body.charAt(cmdEnd) <= '9') cmdEnd++;
-            if (cmdEnd > cmdStart) cmd = body.substring(cmdStart, cmdEnd);
-        }
-    }
-    
-    Serial.printf("[API] parsed cmd: %s\n", cmd.c_str());
-    
     bool success = false;
     
-    // Handle both string commands and numeric commands
-    if (cmd == "up" || cmd == "0" || cmd == "0") {
+    if (cmd == "up") {
         success = Somfy.sendCommand(id, SOMFY_UP);
-    } else if (cmd == "down" || cmd == "1") {
+    } else if (cmd == "down") {
         success = Somfy.sendCommand(id, SOMFY_DOWN);
-    } else if (cmd == "my" || cmd == "stop" || cmd == "2") {
+    } else if (cmd == "my") {
         success = Somfy.sendCommand(id, SOMFY_MY);
-    } else if (cmd == "prog" || cmd == "16") {
-        success = Somfy.sendCommand(id, SOMFY_PROG);
-    } else if (body.indexOf("\"target\":") >= 0) {
+    } else if (cmd == "stop") {
+        Somfy.stop(id);
+        success = true;
+    } else if (cmd == "target") {
         int targetStart = body.indexOf("\"target\":") + 9;
-        while (targetStart < body.length() && (body.charAt(targetStart) == ' ' || body.charAt(targetStart) == '\t')) targetStart++;
-        int targetEnd = targetStart;
-        while (targetEnd < body.length() && body.charAt(targetEnd) >= '0' && body.charAt(targetEnd) <= '9') targetEnd++;
-        if (targetEnd > targetStart) {
-            uint8_t target = body.substring(targetStart, targetEnd).toInt();
-            success = Somfy.sendPosition(id, target);
-        }
+        uint8_t target = body.substring(targetStart).toInt();
+        success = Somfy.sendPosition(id, target);
     }
     
     if (success) {
@@ -529,7 +394,6 @@ void WebAPI::handleWifiScan() {
 }
 
 void WebAPI::handleDeviceInfo() {
-    float cpuTemp = temperatureRead();
     String json = "{";
     json += "\"name\":\"Skyeo\",";
     json += "\"version\":\"" + String(SKYEO_VERSION) + "\",";
@@ -538,8 +402,6 @@ void WebAPI::handleDeviceInfo() {
     json += "\"ip\":\"" + Network::getIPAddress() + "\",";
     json += "\"mac\":\"" + Network::getMAC() + "\",";
     json += "\"rssi\":" + String(Network::getRSSI()) + ",";
-    json += "\"uptime\":" + String(millis() / 1000) + ",";
-    json += "\"cpuTemp\":" + String(cpuTemp, 1) + ",";
     json += "\"schedules\":" + String(Scheduler::getScheduleCount()) + ",";
     json += "\"apMode\":" + String(Network::isAPMode() ? "true" : "false");
     json += "}";
@@ -547,101 +409,9 @@ void WebAPI::handleDeviceInfo() {
 }
 
 void WebAPI::handleReboot() {
-    sendJSON(200, "{\"success\":true,\"message\":\"Gerat startet neu...\"}");
+    sendJSON(200, "{\"success\":true,\"message\":\"Gerät startet neu...\"}");
     delay(1000);
     ESP.restart();
-}
-
-void WebAPI::handleReset() {
-    Serial.println("[API] Factory reset requested");
-    
-    // Clear all shades
-    for (uint8_t i = 0; i < MAX_SHADES; i++) {
-        ShadeConfig cfg;
-        if (Config::loadShade(i, cfg)) {
-            Config::deleteShade(i);
-            Serial.printf("[API] Deleted shade %d\n", i);
-        }
-    }
-    
-    // Clear all schedules
-    for (uint8_t i = 0; i < MAX_SCHEDULES; i++) {
-        Schedule sc;
-        if (Config::loadSchedule(i, sc)) {
-            Config::deleteSchedule(i);
-            Serial.printf("[API] Deleted schedule %d\n", i);
-        }
-    }
-    
-    Serial.println("[API] Factory reset complete");
-    sendJSON(200, "{\"success\":true,\"message\":\"Werksreset abgeschlossen\"}");
-}
-
-void WebAPI::handleBackup() {
-    String backup = "{";
-    backup += "\"version\":\"1.0\",";
-    backup += "\"timestamp\":" + String(millis()) + ",";
-    
-    // Backup shades
-    backup += "\"shades\":[";
-    bool firstShade = true;
-    for (uint8_t i = 0; i < MAX_SHADES; i++) {
-        ShadeConfig cfg;
-        if (Config::loadShade(i, cfg)) {
-            if (!firstShade) backup += ",";
-            firstShade = false;
-            backup += "{\"id\":" + String(cfg.id) + ",";
-            backup += "\"name\":\"" + String(cfg.name) + "\",";
-            backup += "\"remoteAddress\":" + String(cfg.remoteAddress) + ",";
-            backup += "\"upTime\":" + String(cfg.upTime) + ",";
-            backup += "\"downTime\":" + String(cfg.downTime) + ",";
-            backup += "\"rollingCode\":" + String(cfg.rollingCode) + "}";
-        }
-    }
-    backup += "],";
-    
-    // Backup schedules
-    backup += "\"schedules\":[";
-    bool firstSched = true;
-    for (uint8_t i = 0; i < MAX_SCHEDULES; i++) {
-        Schedule sc;
-        if (Config::loadSchedule(i, sc)) {
-            if (!firstSched) backup += ",";
-            firstSched = false;
-            backup += "{\"id\":" + String(sc.id) + ",";
-            backup += "\"shadeId\":" + String(sc.shadeId) + ",";
-            backup += "\"hour\":" + String(sc.hour) + ",";
-            backup += "\"minute\":" + String(sc.minute) + ",";
-            backup += "\"command\":" + String(sc.command) + ",";
-            backup += "\"days\":" + String(sc.days) + "}";
-        }
-    }
-    backup += "],";
-    
-    // Backup config
-    backup += "\"config\":{";
-    backup += "\"timezoneOffset\":" + String(Config::getTimezoneOffset());
-    backup += "}";
-    
-    backup += "}";
-    
-    server.sendHeader("Content-Disposition", "attachment; filename=skyeo_backup.txt");
-    server.send(200, "application/json", backup);
-}
-
-void WebAPI::handleRestore() {
-    if (!server.hasArg("plain")) {
-        sendError(400, "Keine Daten");
-        return;
-    }
-    
-    String body = server.arg("plain");
-    Serial.printf("[API] Restore data: %s\n", body.c_str());
-    
-    // Simple parsing - this is a basic implementation
-    // In a real app you'd want more robust JSON parsing
-    
-    sendJSON(200, "{\"success\":true,\"message\":\"Wiederherstellung gestartet...\"}");
 }
 
 void WebAPI::handleNotFound() {
@@ -746,7 +516,7 @@ void WebAPI::handleAntennaLogs() {
         json += "\"timestamp\":" + String(frame.timestamp) + ",";
         json += "\"address\":\"" + String(frame.remoteAddress, HEX) + "\",";
         json += "\"rollingCode\":" + String(frame.rollingCode) + ",";
-        json += "\"command\":\"" + jsonEscape(translateSomfyCommand(static_cast<somfy_commands>(frame.command))) + "\",";
+        json += "\"command\":" + String(frame.command) + ",";
         json += "\"rssi\":" + String(frame.rssi) + ",";
         json += "\"direction\":\"" + String(frame.direction) + "\",";
         json += "\"valid\":" + String(frame.valid ? "true" : "false");
